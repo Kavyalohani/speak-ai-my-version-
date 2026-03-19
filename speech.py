@@ -363,12 +363,12 @@ class Speech(GstSpeechPlayer):
             if appsrc:
                 appsrc.emit("end-of-stream")
 
-    def speak(self, status, text):
+    def speak(self, status, text, lang='hi'):
     from gtts import gTTS
     import os
 
     try:
-        tts = gTTS(text=text, lang='hi')
+        tts = gTTS(text=text, lang=lang)
         tts.save("temp.mp3")
         os.system("start temp.mp3")
         return
