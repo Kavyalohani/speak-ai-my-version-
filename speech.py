@@ -19,8 +19,6 @@
 import numpy
 import threading
 import logging
-import os
-
 from gi.repository import Gst
 from gi.repository import GLib
 from gi.repository import GObject
@@ -53,11 +51,10 @@ class Speech(GstSpeechPlayer):
     def __init__(self):
         GstSpeechPlayer.__init__(self)
         self.pipeline = None
-
+        # Initialize Kokoro TTS pipeline if available
         self.kokoro_pipeline = None
         if KOKORO_AVAILABLE:
             threading.Thread(target=self.setup_kokoro).start()
-
         self.kokoro_voices = [
             'af_heart', 'af_alloy', 'af_aoede', 'af_bella', 'af_jessica', 'af_kore',
             'af_nicole', 'af_nova', 'af_river', 'af_sarah', 'af_sky',
@@ -71,12 +68,15 @@ class Speech(GstSpeechPlayer):
 
     def setup_kokoro(self):
         self.kokoro_pipeline = KPipeline(lang_code='a')
-
+    # The pipeline has two sinks:
+    # 'ears' plays audio output
+    # 'fakesink' is used for mouth/lip-sync processing
+    # Create and configure GStreamer pipeline for audio playback and lip-sync
     def make_pipeline(self):
         if self.pipeline is not None:
             self.stop_sound_device()
             del self.pipeline
-
+        # Use Kokoro pipeline if available, otherwise fallback to espeak
         if KOKORO_AVAILABLE and self.kokoro_pipeline:
             cmd = (
                 'appsrc name=kokoro_src '
@@ -129,6 +129,7 @@ class Speech(GstSpeechPlayer):
             logger.warning(f"Invalid Kokoro voice: {voice_name}")
 
     def _use_espeak(self, status, text):
+        # Configure espeak parameters and trigger playback
         src = self.pipeline.get_by_name('espeak')
 
         pitch = int(status.pitch) - 100
@@ -143,19 +144,21 @@ class Speech(GstSpeechPlayer):
         self.restart_sound_device()
 
     def _stream_kokoro_audio(self, text, voice):
+        # Stream generated Kokoro audio into GStreamer pipeline
         try:
+            # Get appsrc element to push audio buffers
             appsrc = self.pipeline.get_by_name('kokoro_src')
             if not appsrc:
                 logger.error("kokoro_src not found")
                 return
-
+            # Set audio format (float32, mono, 24kHz)
             caps = Gst.Caps.from_string(
                 "audio/x-raw,format=F32LE,rate=24000,channels=1"
             )
             appsrc.set_property("caps", caps)
-
+            # Generate audio chunks using Kokoro
             generator = self.kokoro_pipeline(text, voice=voice)
-
+            # Convert chunks to bytes and push into pipeline
             for _, _, audio_chunk in generator:
                 data_bytes = audio_chunk.numpy().tobytes()
                 buf = Gst.Buffer.new_wrapped(data_bytes)
@@ -163,46 +166,40 @@ class Speech(GstSpeechPlayer):
                 ret = appsrc.emit("push-buffer", buf)
                 if ret != Gst.FlowReturn.OK:
                     break
-
+            # Signal end of audio stream
             appsrc.emit("end-of-stream")
-
+            
+        # Handle streaming errors and ensure pipeline cleanup
         except Exception as e:
             logger.error(f"Kokoro streaming error: {e}")
-            appsrc.emit("end-of-stream")
+            if 'appsrc' in locals() and appsrc: 
+                appsrc.emit("end-of-stream")
 
     def speak(self, status, text, lang='hi'):
-        from gtts import gTTS
+        # Entry point for speech synthesis: chooses Kokoro or espeak
+        logger.debug(f"Speaking text: {text}")
 
-        # Optional quick playback
-        try:
-            tts = gTTS(text=text, lang=lang)
-            tts.save("temp.mp3")
-            os.system("start temp.mp3")
-            return
-        except Exception as e:
-            logger.debug(f"gTTS failed: {e}")
-
+        # Create GStreamer pipeline for audio playback
         self.make_pipeline()
-
-        if KOKORO_AVAILABLE and self.kokoro_pipeline is not None:
+        # Prefer Kokoro TTS if available
+        if KOKORO_AVAILABLE and getattr(self, "kokoro_pipeline", None):
             try:
                 logger.debug("Using Kokoro TTS")
                 self.restart_sound_device()
                 self._stream_kokoro_audio(text, self.current_kokoro_voice)
-
+            # Fallback to espeak if Kokoro fails
             except Exception as e:
+                # If Kokoro fails, fallback to espeak
                 logger.error(f"Kokoro failed: {e}")
                 self._use_espeak(status, text)
-
+        # Use espeak if Kokoro is unavailable
         else:
             logger.debug("Kokoro not available, using espeak")
-            self._use_espeak(status, text)
-
-
-_speech = None
-
+            self._use_espeak(status, text)          
+_speech = None            
 def get_speech():
     global _speech
     if _speech is None:
         _speech = Speech()
     return _speech
+    
